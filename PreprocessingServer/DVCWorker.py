@@ -4,9 +4,27 @@ import logging
 import boto3
 import subprocess
 import shutil
+import os
+from minio.error import S3Error
+from minio import Minio
+import yaml  # 解析 DVC 檔案
+from fastapi import  HTTPException
 
 class DVCWorker:
-    def __init__(self, dag_id: str, execution_id: str, minio_bucket: str, minio_url: str, access_key: str, secret_key: str, git_repo_path: str, logger):
+    def __init__(
+            self, dag_id: str, 
+            execution_id: str, 
+            minio_bucket: str, 
+            minio_url: str, 
+            access_key: str, 
+            secret_key: str, 
+            git_repo_path: str, 
+            logger,
+            dataset_storage_minio_url : str,
+            dataset_storage_minio_bucket: str,
+            dataset_storage_minio_access_key: str,
+            dataset_storage_minio_secret_key: str
+        ):
         self.dag_id = dag_id
         self.execution_id = execution_id
         self.git_repo_path = Path(git_repo_path).resolve()  # Git Local Path 儲存
@@ -17,6 +35,18 @@ class DVCWorker:
         self.remote_name = f"remote_{dag_id}_{execution_id}"
         self.s3_client = boto3.client('s3', endpoint_url=self.minio_url, aws_access_key_id=self.access_key, aws_secret_access_key=self.secret_key)
         self.logger = logger
+        self.dataset_storage_minio_url = dataset_storage_minio_url
+        self.dataset_storage_minio_bucket = dataset_storage_minio_bucket
+        self.dataset_storage_minio_access_key = dataset_storage_minio_access_key
+        self.dataset_storage_minio_secret_key = dataset_storage_minio_secret_key
+        
+        # 預設 dataset storage 是存在地端 所以先不用s3
+        # self.dataset_s3_client = boto3.client(
+        #                                     's3', 
+        #                                     endpoint_url=self.dataset_storage_minio_url, 
+        #                                     aws_access_key_id=self.dataset_storage_minio_access_key, 
+        #                                     aws_secret_access_key=self.dataset_storage_minio_secert_key
+        #                                 )
 
         # 檢查並創建 Git 儲存路徑
         self.create_directory_if_not_exists(self.git_repo_path)
@@ -206,7 +236,6 @@ class DVCWorker:
         
         return {"status": "success", "message": "Data added to DVC, pushed to remote storage, and .dvc file uploaded to MinIO."}
 
-
     def git_add_commit_and_push(self, project_path: str, message: str):
         """將指定路徑中的 .dvc 文件複製到统一的 Git 倉庫中，並提交和推送"""
         try:
@@ -282,4 +311,156 @@ class DVCWorker:
             self.logger.error(f"Error during pull operation: {str(e)}")
             return {"status": "error", "message": str(e)}
 
-   
+    """
+    usage for dataset download sepecifically
+    """
+    # 創建資料夾（如果不存在）
+    def create_folder_if_not_exists(self, folder_path):
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+    
+    # MinIO 客戶端初始化 (because use minio to store training dataset)
+    def init_minio_client(self):
+
+        self.logger.info("MinIO Client Initializing......")
+        return Minio(
+            self.dataset_storage_minio_url,
+            access_key=self.dataset_storage_minio_access_key,
+            secret_key=self.dataset_storage_minio_secret_key,
+            secure=False  # 如果 MinIO 沒有 SSL，設置為 False
+        )
+
+    # 解析 DVC 檔案並獲取 outs 路徑
+    def parse_dvc_file(dvc_file_path):
+        with open(dvc_file_path, 'r') as file:
+            dvc_data = yaml.safe_load(file)
+            outs = dvc_data.get("outs", [])
+            dataset_paths = [item['path'] for item in outs]
+            return dataset_paths
+    
+    # 下載 dvc_file 的 result.dvc
+    def download_dvc_file(self, minio_client, target_folder):
+        dvc_folder = os.path.join(target_folder, "dvc_file")
+        self.create_folder_if_not_exists(dvc_folder)
+        dvc_file_path = os.path.join(dvc_folder, "result.dvc")
+        
+        try:
+            # 下載 result.dvc
+            dataset_bucket_name = self.dataset_storage_minio_bucket
+            minio_client.fget_object(dataset_bucket_name, "dvc_file/result.dvc", dvc_file_path)
+            self.logger.info(f"Downloaded: dvc_file/result.dvc -> {dvc_file_path}")
+        except S3Error as e:
+            self.logger.error(f"MinIO Error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"MinIO Error: {str(e)}")
+
+    # 使用 DVC Pull 下載 dataset
+    def download_dataset_with_dvc(self, target_folder):
+        dvc_folder = os.path.join(target_folder, "dvc_file")
+        os.chdir(dvc_folder)
+        
+        # 初始化 Git 與 DVC（如果尚未初始化）
+        if not os.path.exists(os.path.join(dvc_folder, ".git")):
+            subprocess.run(["git", "init"])
+            self.logger.info("Initialized Git repository.")
+        if not os.path.exists(os.path.join(dvc_folder, ".dvc")):
+            subprocess.run(["dvc", "init", "--no-scm"])
+            self.logger.info("Initialized DVC repository.")
+
+        # 設定 DVC 遠端為 MinIO
+        remote_name = "minio"
+
+        remote_bucket = self.dataset_storage_minio_bucket
+        remote_minio_url = f"s3://{remote_bucket}/dataset"
+        
+        remote_url = self.dataset_storage_minio_url
+        remote_access_key=self.dataset_storage_minio_access_key
+        remote_secret_key = self.dataset_storage_minio_secret_key
+        
+        subprocess.run(["dvc", "remote", "add", "-f", remote_name, remote_minio_url])
+        subprocess.run(["dvc", "remote", "modify", remote_name, "access_key_id", remote_access_key])
+        subprocess.run(["dvc", "remote", "modify", remote_name, "secret_access_key", remote_secret_key])
+        subprocess.run(["dvc", "remote", "modify", remote_name, "endpointurl", f"http://{remote_url}"])
+        
+        # **設定 DVC 預設遠端**
+        subprocess.run(["dvc", "remote", "default", remote_name])
+        self.logger.info(f"Set DVC default remote: {remote_name}")
+
+        # DVC Pull
+        result = subprocess.run(["dvc", "pull"], capture_output=True, text=True)
+        self.logger.info("DVC Pull Output:", result.stdout)
+        self.logger.info("DVC Pull Error:", result.stderr)
+        self.logger.info("DVC Pull Completed")
+
+        # 檢查 DVC Pull 結果
+        if "failed to pull data from the cloud" in result.stderr:
+            self.logger.error("Failed to pull data from the cloud. Check if the cache is up to date")
+            raise HTTPException(status_code=500, detail="Failed to pull data from the cloud. Check if the cache is up to date.")
+        
+    # 下載 excel_file 資料夾
+    def download_excel_files(self, minio_client, target_folder):
+        excel_folder = os.path.join(target_folder, "excel_file")
+        self.create_folder_if_not_exists(excel_folder)
+        
+        try:
+            # 獲取 excel_file 資料夾中的所有檔案
+            dataset_storage_bucket = self.dataset_storage_minio_bucket
+            objects = minio_client.list_objects(dataset_storage_bucket, prefix="excel_file/", recursive=True)
+            for obj in objects:
+                object_name = obj.object_name
+                relative_path = object_name.replace("excel_file/", "")
+                object_path = os.path.join(excel_folder, relative_path)
+
+                # 創建目錄（如果不存在）
+                os.makedirs(os.path.dirname(object_path), exist_ok=True)
+
+                # 下載檔案
+                minio_client.fget_object(dataset_storage_bucket, object_name, object_path)
+                self.logger.info(f"Downloaded: {object_name} -> {object_path}")
+
+        except S3Error as e:
+            self.logger.error(f"MinIO Error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"MinIO Error: {str(e)}")
+
+    # 重組資料夾結構
+    def reorganize_data_folder(self, target_folder):
+        """
+        將 dvc_file/result 資料夾移動並重新命名
+        將 mapping.xlsx 移動到 train_test 資料夾中
+        """
+        # 原始資料夾
+        dvc_result_folder = os.path.join(target_folder, "dvc_file", "result")
+        excel_file = os.path.join(target_folder, "excel_file", "mapping.xlsx")
+
+        # 目標資料夾
+        target_result_folder = os.path.join(target_folder, "train_test", "For_training_testing", "320x320", "parcel_NIRRGA")
+        target_excel_folder = os.path.join(target_folder, "train_test")
+
+        # 移動並重新命名 result 資料夾
+        if os.path.exists(dvc_result_folder):
+            os.makedirs(target_result_folder, exist_ok=True)
+            
+            # **逐一移動檔案與資料夾**
+            for item in os.listdir(dvc_result_folder):
+                src_path = os.path.join(dvc_result_folder, item)
+                dest_path = os.path.join(target_result_folder, item)
+
+                # 若是目錄，則用 copytree
+                if os.path.isdir(src_path):
+                    shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
+                else:
+                    # 若是檔案，則用 move
+                    shutil.move(src_path, dest_path)
+            
+            # 刪除原本的 result 資料夾
+            shutil.rmtree(dvc_result_folder)
+            self.logger.info(f"Moved and merged result folder to {target_result_folder}")
+        else:
+            self.logger.error("No result folder to move.")
+
+        # 移動 mapping.xlsx 到 train_test 資料夾
+        if os.path.exists(excel_file):
+            os.makedirs(target_excel_folder, exist_ok=True)
+            shutil.move(excel_file, os.path.join(target_excel_folder, "mapping.xlsx"))
+            self.logger.info(f"Moved mapping.xlsx to {target_excel_folder}")
+        else:
+            self.logger.error("No mapping.xlsx to move.")

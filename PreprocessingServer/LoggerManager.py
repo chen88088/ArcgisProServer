@@ -49,3 +49,13 @@ class LoggerManager:
     def logger_exists(self, dag_id: str, execution_id: str):
         """檢查logger是否存在"""
         return f"{dag_id}_{execution_id}" in self.loggers
+    
+    def log_section_header(self, logger, section_title: str):
+        """記錄分隔標題以提升可讀性"""
+        border = "*" * 60
+        centered_title = f"**********[{section_title}]**********"
+        logger.info(border)
+        logger.info(border)
+        logger.info(centered_title.center(60))
+        logger.info(border)
+        logger.info(border)

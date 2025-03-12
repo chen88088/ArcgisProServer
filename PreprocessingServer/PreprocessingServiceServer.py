@@ -16,6 +16,10 @@ from typing import Dict
 from LoggerManager import LoggerManager
 from DagManager import DagManager
 import config
+import redis
+import socket
+import json
+
 
 # 設置基本的日誌設定
 logging.basicConfig(level=logging.DEBUG)
@@ -36,36 +40,82 @@ class RegisterServiceRequest(BaseModel):
     service_resource_type: str  # 例如: "CPU" 或 "GPU"
 
 
+def register_machine():
+    """
+    當 Preprocessing Server 啟動時，向 Consul 註冊
+    """
+    service_registration = {
+        "ID": NODE_ID,  # 用 Hostname 當作 Consul 記錄的機器 ID
+        "Name": SERVICE_NAME,
+        "Tags": [f"node_id={NODE_ID}"],  # 加入標籤，讓 DAG 之後可以查詢
+        "Address": NODE_IP,
+        "Port": SERVICE_PORT,
+        "Check": {
+            "HTTP": f"http://{NODE_IP}:{SERVICE_PORT}/health",
+            "Interval": "10s",
+            "Timeout": "5s"
+        }
+    }
+
+    # 向 Consul 註冊機器
+    response = requests.put(f"{CONSUL_HOST}/v1/agent/service/register", data=json.dumps(service_registration))
+    
+    if response.status_code == 200:
+        logging.info(f"機器 {NODE_ID} 成功註冊到 Consul！")
+    else:
+        logging.error(f"註冊失敗: {response.text}")
+
+def deregister_machine():
+    """
+    當 Preprocessing Server 停止時，從 Consul 註銷
+    """
+    response = requests.put(f"{CONSUL_HOST}/v1/agent/service/deregister/{NODE_ID}")
+
+    if response.status_code == 200:
+        logging.info(f"✅ 機器 {NODE_ID} 已從 Consul 註銷")
+    else:
+        logging.error(f"❌ 註銷失敗: {response.text}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.debug("Entering lifespan startup")
-    register_data = RegisterServiceRequest(
-        service_name=SERVICE_NAME,
-        service_address=SERVICE_ADDRESS,
-        service_port=SERVICE_PORT,
-        service_resource_type=SERVICE_RESOURCE_TYPE, 
-    )
-
+    '''
+    # register_data = RegisterServiceRequest(
+    #     service_name=SERVICE_NAME,
+    #     service_address=SERVICE_ADDRESS,
+    #     service_port=SERVICE_PORT,
+    #     service_resource_type=SERVICE_RESOURCE_TYPE, 
+    # )
+    '''
     try:
+        '''
         #去跟servermanager註冊自己的ip與資源用量
-        logging.debug("Sending registration request to Server Manager")
-        response = requests.post(f"{NODE_AGENT_URL}/service/register", json=register_data.dict())
-        logging.debug(f"Registration request response status: {response.status_code}")
-        response.raise_for_status()
-        logging.debug(f"Response: {response.text}")
-        logging.info("Registered with Server Manager successfully")      
+        # logging.debug("Sending registration request to Server Manager")
+        # response = requests.post(f"{NODE_AGENT_URL}/service/register", json=register_data.dict())
+        # logging.debug(f"Registration request response status: {response.status_code}")
+        # response.raise_for_status()
+        # logging.debug(f"Response: {response.text}")
+        # logging.info("Registered with Server Manager successfully")      
+        '''
+        # 啟動時執行
+        register_machine()
+        
     except requests.RequestException as e:
-        logging.error(f"Failed to register with Server Manager: {e}")
+        logging.error(f"Failed to register with controller: {e}")
         logging.debug(f"Response: {e.response.text if e.response else 'No response'}")
 
     yield
 
     logging.debug("Entering lifespan shutdown")
     try:
-        #　去跟servermanager 清除自己的ip與資料
-        response = requests.post(f"{NODE_AGENT_URL}/service/unregister", json=register_data.dict())
-        response.raise_for_status()
-        logging.info("Resources cleaned up successfully")
+        '''
+        # #　去跟servermanager 清除自己的ip與資料
+        # response = requests.post(f"{NODE_AGENT_URL}/service/unregister", json=register_data.dict())
+        # response.raise_for_status()
+        logging.info("Resources cleaned up successfully")'
+        '''
+        # 停止時執行
+        deregister_machine()
     except requests.RequestException as e:
         logging.error(f"Failed to clean up resources: {e}")
 
@@ -91,6 +141,30 @@ class DagRequest(BaseModel):
     MODEL_VERSION: str
     DEPLOYER_NAME: str
     DEPLOYER_EMAIL: str
+
+# 連接 Redis（如果 Redis 是在 Docker 內部，用 `my-redis`，如果 Redis 在本機，用 `localhost`）
+# REDIS_HOST = "http://172.17.0.2"
+REDIS_HOST = "localhost"
+REDIS_PORT = 6379
+redis_lock = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+
+try:
+    redis_lock = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+    redis_lock.ping()  # 檢查 Redis 是否可用
+except redis.ConnectionError:
+    raise Exception("無法連線到 Redis，請確認 Redis 伺服器是否正在運行！")
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "OK"}
+
+
+CONSUL_HOST = "http://10.52.52.138:8500"
+SERVICE_NAME = "preprocessing"
+NODE_ID = socket.gethostname()
+SERVICE_PORT = 8003  # 本機服務端口
+NODE_IP = "10.52.52.136"
 
 
 # [Preprocessing/RegisterDag]
@@ -123,6 +197,17 @@ async def register_dag_and_logger_and_dvc_worker(request: DagRequest):
     git_local_repo_for_dvc = dag_folder / "GIT_LOCAL_REPO_FOR_DVC" / f'{dag_id}_{execution_id}'
     dvc_manager.init_worker(dag_id=dag_id, execution_id=execution_id, git_repo_path=git_local_repo_for_dvc)
 
+    # 獲取 Logger 和 DVCWorker
+    logger = logger_manager.get_logger(dag_id, execution_id)
+    if logger:
+        logger_manager.log_section_header(logger, "Preprocessing/RegisterDag")
+
+    # **打印請求的 request body**
+    request_dict = request.model_dump()
+    logger.info(f"Received request body:\n{json.dumps(request_dict, indent=4)}")
+
+    logger.info(f"DAG, Logger, and DVCWorker initialized for DAG_ID: {dag_id}, EXECUTION_ID: {execution_id}")
+
     return {"status": "success", "message": f"DAG, Logger, and DVCWorker initialized for DAG_ID: {dag_id}, EXECUTION_ID: {execution_id}"}
 
 # [Preprocessing/DownloadDataset]
@@ -138,6 +223,9 @@ async def download_dataset(request:DagRequest):
     dag_root_folder_path = f"{dag_id}_{execution_id}"
     # 獲取 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
+    if logger:
+        logger_manager.log_section_header(logger, "Preprocessing/DownloadDataset")
+
     dvc_worker = dvc_manager.get_worker(dag_id, execution_id)
 
     dataset_name =  request.DATASET_NAME
@@ -212,6 +300,9 @@ async def setup_folders_for_preprocessing(request: DagRequest):
 
     # 獲取 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
+    if logger:
+        logger_manager.log_section_header(logger, "Preprocessing/SetupFolder")
+
     dvc_worker = dvc_manager.get_worker(dag_id, execution_id)
 
     code_repo_url = request.CODE_REPO_URL.get(task_stage_type)
@@ -259,6 +350,8 @@ async def modify_preprocessing_config(request: DagRequest):
     
     # 獲取 Logger
     logger = logger_manager.get_logger(dag_id, execution_id)
+    if logger:
+        logger_manager.log_section_header(logger, "Preprocessing/ModifyPreprocessingConfig")
 
     try:
         dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
@@ -276,7 +369,14 @@ async def modify_preprocessing_config(request: DagRequest):
         root_dict = str(repo_preprocessing_path)
         config_content = config_content.replace(r'C:\Users\jay\Desktop\code\NCU-RSS-1.5-preprocessing', root_dict)
         
-        workspace = r"C:\Users\PongeSheng\Documents\ArcGIS\Projects\PNGoutput\PNGoutput.gdb"
+        # 獲取當前使用者名稱
+        user_name = os.getlogin()
+
+        # 動態設定 workspace
+        workspace = fr"C:\Users\{user_name}\Documents\ArcGIS\Projects\PNGoutput\PNGoutput.gdb"
+
+        # 靜態設定 workspace
+        # workspace = r"C:\Users\chen88088\Documents\ArcGIS\Projects\PNGoutput\PNGoutput.gdb"
         config_content = config_content.replace(r'C:\Users\Jay\Documents\ArcGIS\Projects\PNGoutput\PNGoutput.gdb', workspace)
         
         Dataset_Path = Path(dag_root_folder_path / "Dataset" / f"{dataset_name}___{dataset_version}")
@@ -323,6 +423,8 @@ async def execute_generate_parcel_unique_id(request: DagRequest):
 
     # 獲取對應logger 
     logger = logger_manager.get_logger(dag_id, execution_id)
+    if logger:
+        logger_manager.log_section_header(logger, "Preprocessing/GenerateParcelUniqueId")
 
     dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
     root_folder_path = Path(dag_root_folder)
@@ -368,6 +470,8 @@ async def execute_generate_png(request: DagRequest):
 
     # 獲取對應的 Logger 
     logger = logger_manager.get_logger(dag_id, execution_id)
+    if logger:
+        logger_manager.log_section_header(logger, "Preprocessing/GeneratePng")
 
     dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
     root_folder_path = Path(dag_root_folder)
@@ -413,6 +517,8 @@ async def execute_write_gt_file(request: DagRequest):
 
     # 獲取對應logger 
     logger = logger_manager.get_logger(dag_id, execution_id)
+    if logger:
+        logger_manager.log_section_header(logger, "Preprocessing/WriteGtFile")
 
     dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
     root_folder_path = Path(dag_root_folder)
@@ -459,6 +565,9 @@ async def upload_preprocessing_result(request: DagRequest):
 
     # 獲取對應的 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
+    if logger:
+        logger_manager.log_section_header(logger, "Preprocessing/UploadPreprocessingResult")
+
     dvc_worker = dvc_manager.get_worker(dag_id, execution_id)
 
     try:
@@ -528,6 +637,8 @@ async def upload_log_to_s3(request: DagRequest):
     
     # 獲取 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
+    if logger:
+        logger_manager.log_section_header(logger, "Preprocessing/UploadLogToS3")
     dvc_worker = dvc_manager.get_worker(dag_id, execution_id)
 
     try:

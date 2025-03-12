@@ -20,7 +20,12 @@ class DVCManager:
                 access_key=config.MINIO_ACCESS_KEY,
                 secret_key=config.MINIO_SECRET_KEY,
                 git_repo_path= Path(git_repo_path).resolve(),  # or any other path from config
-                logger=logger
+                logger=logger,
+                dataset_storage_minio_url = config.DATASET_STORAGE_MINIO_URL,
+                dataset_storage_minio_bucket= config.DATASET_STORAGE_MINIO_BUCKET,
+                dataset_storage_minio_access_key= config.DATASET_STORAGE_MINIO_ACCESS_KEY,
+                dataset_storage_minio_secret_key= config.DATASET_STORAGE_MINIO_SECRET_KEY
+
             )
             self.workers[worker_key] = worker
             logger.info(f"DVCWorker initialized for dag: {worker_key}")
