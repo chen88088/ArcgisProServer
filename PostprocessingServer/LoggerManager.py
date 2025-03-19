@@ -10,7 +10,7 @@ class LoggerManager:
     def init_logger(self, dag_id: str, execution_id: str, log_folder_root_path: str):
         """初始化logger並存储到 loggers 字典中"""
         # 創建專屬的 DAG 目錄
-        dag_logs_folder = Path.home() / "Desktop" / log_folder_root_path/ "LOGS" 
+        dag_logs_folder = log_folder_root_path/ "LOGS" 
         dag_logs_folder.mkdir(parents=True, exist_ok=True)
 
         # 生成唯一的日誌文件路徑（加入時間戳記防止衝突）
@@ -49,3 +49,13 @@ class LoggerManager:
     def logger_exists(self, dag_id: str, execution_id: str):
         """檢查logger是否存在"""
         return f"{dag_id}_{execution_id}" in self.loggers
+    
+    def log_section_header(self, logger, section_title: str):
+        """記錄分隔標題以提升可讀性"""
+        border = "*" * 60
+        centered_title = f"**********[{section_title}]**********"
+        logger.info(border)
+        logger.info(border)
+        logger.info(centered_title.center(60))
+        logger.info(border)
+        logger.info(border)

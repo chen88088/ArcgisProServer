@@ -9,14 +9,14 @@
             "args": [
                 "PostprocessingServiceServer:app",
                 "--reload",
-                "--host", "10.52.52.137",
-                "--port", "8085"
+                "--host", "10.52.52.136",
+                "--port", "8005"
             ],
             "console": "integratedTerminal",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             },
-            "pythonPath": "C:/Users/PongeSheng/anaconda3/envs/preprocessing/python.exe"
+            "pythonPath": "C:/Users/chen88088/Desktop/thesis_project/ArcgisProServer/PostprocessingServer/VENV_POSTPROCESSING/Scripts/python.exe"
         }
     ]
 }
