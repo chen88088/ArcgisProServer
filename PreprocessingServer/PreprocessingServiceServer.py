@@ -24,30 +24,59 @@ import json
 # 設置基本的日誌設定
 logging.basicConfig(level=logging.DEBUG)
 
-NODE_AGENT_URL = "http://10.52.52.137:8080"
+# NODE_AGENT_URL = "http://10.52.52.137:8080"
 
-# SERVICE_NAME 
+# # SERVICE_NAME 
+# SERVICE_NAME = "Preprocessing"
+# SERVICE_ADDRESS = "http://10.52.52.137"
+# SERVICE_PORT = 8081
+# SERVICE_RESOURCE_TYPE = "ARCGIS"
+
+
+CONSUL_HOST = "http://10.52.52.138:8500"
+
 SERVICE_NAME = "Preprocessing"
-SERVICE_ADDRESS = "http://10.52.52.137"
-SERVICE_PORT = 8081
-SERVICE_RESOURCE_TYPE = "ARCGIS"
+NODE_ID = socket.gethostname()
+SERVICE_PORT = 8003  # 本機服務端口
+NODE_IP = "10.52.52.136"
 
-# service server 註冊模型
-class RegisterServiceRequest(BaseModel):
-    service_name: str
-    service_address: str
-    service_port: int
-    service_resource_type: str  # 例如: "CPU" 或 "GPU"
+
+#  掛載路徑 (本地測試用)
+STORAGE_PATH = "F:/mnt/storage" 
+
+# # service server 註冊模型
+# class RegisterServiceRequest(BaseModel):
+#     service_name: str
+#     service_address: str
+#     service_port: int
+#     service_resource_type: str  # 例如: "CPU" 或 "GPU"
+
+# 定義 Pydantic 模型
+class DagRequest(BaseModel):
+    DAG_ID: str
+    EXECUTION_ID: str
+    TASK_STAGE_TYPE: str
+    DATASET_NAME: str
+    DATASET_VERSION: str
+    CODE_REPO_URL: Dict[str, str]
+    IMAGE_NAME: Dict[str, str]
+    MODEL_NAME: str
+    MODEL_VERSION: str
+    DEPLOYER_NAME: str
+    DEPLOYER_EMAIL: str
 
 
 def register_machine():
     """
     當 Preprocessing Server 啟動時，向 Consul 註冊
     """
+    service_id = f"{NODE_ID}-{SERVICE_NAME}"
+    
+    response = requests.put(f"{CONSUL_HOST}/v1/agent/service/deregister/{service_id}")
     service_registration = {
-        "ID": NODE_ID,  # 用 Hostname 當作 Consul 記錄的機器 ID
+        "ID": service_id,  # 用 Hostname 當作 Consul 記錄的機器 ID
         "Name": SERVICE_NAME,
-        "Tags": [f"node_id={NODE_ID}"],  # 加入標籤，讓 DAG 之後可以查詢
+        "Tags": [f"node_id={NODE_ID}", f"service_name={SERVICE_NAME}"],  # 加入標籤，讓 DAG 之後可以查詢
         "Address": NODE_IP,
         "Port": SERVICE_PORT,
         "Check": {
@@ -69,7 +98,9 @@ def deregister_machine():
     """
     當 Preprocessing Server 停止時，從 Consul 註銷
     """
-    response = requests.put(f"{CONSUL_HOST}/v1/agent/service/deregister/{NODE_ID}")
+    service_id = f"{NODE_ID}-{SERVICE_NAME}"
+    
+    response = requests.put(f"{CONSUL_HOST}/v1/agent/service/deregister/{service_id}")
 
     if response.status_code == 200:
         logging.info(f"✅ 機器 {NODE_ID} 已從 Consul 註銷")
@@ -128,44 +159,23 @@ dvc_manager = DVCManager(logger_manager)
 # 實例化 DagManger
 dag_manager = DagManager(logger_manager)
 
-# 定義 Pydantic 模型
-class DagRequest(BaseModel):
-    DAG_ID: str
-    EXECUTION_ID: str
-    TASK_STAGE_TYPE: str
-    DATASET_NAME: str
-    DATASET_VERSION: str
-    CODE_REPO_URL: Dict[str, str]
-    IMAGE_NAME: Dict[str, str]
-    MODEL_NAME: str
-    MODEL_VERSION: str
-    DEPLOYER_NAME: str
-    DEPLOYER_EMAIL: str
 
-# 連接 Redis（如果 Redis 是在 Docker 內部，用 `my-redis`，如果 Redis 在本機，用 `localhost`）
-# REDIS_HOST = "http://172.17.0.2"
-REDIS_HOST = "localhost"
-REDIS_PORT = 6379
-redis_lock = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+# # 連接 Redis（如果 Redis 是在 Docker 內部，用 `my-redis`，如果 Redis 在本機，用 `localhost`）
+# # REDIS_HOST = "http://172.17.0.2"
+# REDIS_HOST = "localhost"
+# REDIS_PORT = 6379
+# redis_lock = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
 
-try:
-    redis_lock = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
-    redis_lock.ping()  # 檢查 Redis 是否可用
-except redis.ConnectionError:
-    raise Exception("無法連線到 Redis，請確認 Redis 伺服器是否正在運行！")
+# try:
+#     redis_lock = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+#     redis_lock.ping()  # 檢查 Redis 是否可用
+# except redis.ConnectionError:
+#     raise Exception("無法連線到 Redis，請確認 Redis 伺服器是否正在運行！")
 
 
 @app.get("/health")
 def health_check():
     return {"status": "OK"}
-
-
-CONSUL_HOST = "http://10.52.52.138:8500"
-SERVICE_NAME = "preprocessing"
-NODE_ID = socket.gethostname()
-SERVICE_PORT = 8003  # 本機服務端口
-NODE_IP = "10.52.52.136"
-
 
 # [Preprocessing/RegisterDag]
 @app.post("/Preprocessing/RegisterDag")
@@ -180,10 +190,14 @@ async def register_dag_and_logger_and_dvc_worker(request: DagRequest):
     if not dag_id or not execution_id:
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
-    dag_root_folder_path = f"{dag_id}_{execution_id}"
+    
     # 確認 DAG 是否已在 dag_manager 中註冊
     if dag_manager.is_registered(dag_id, execution_id):
         return {"status": "success", "message": "DAG is already registered."}
+
+    
+    dag_root_folder_path = Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
+
 
     # 登記 DAG 到 dag_manager
     dag_manager.register_dag(dag_id, execution_id , dag_root_folder_path)
@@ -193,8 +207,8 @@ async def register_dag_and_logger_and_dvc_worker(request: DagRequest):
         logger_manager.init_logger(dag_id, execution_id, dag_root_folder_path)
 
     # 初始化並註冊 DVCWorker
-    dag_folder = Path.home() / "Desktop" / dag_root_folder_path
-    git_local_repo_for_dvc = dag_folder / "GIT_LOCAL_REPO_FOR_DVC" / f'{dag_id}_{execution_id}'
+    git_local_repo_for_dvc = os.path.join(dag_root_folder_path, "GIT_LOCAL_REPO_FOR_DVC")
+    
     dvc_manager.init_worker(dag_id=dag_id, execution_id=execution_id, git_repo_path=git_local_repo_for_dvc)
 
     # 獲取 Logger 和 DVCWorker
@@ -220,7 +234,6 @@ async def download_dataset(request:DagRequest):
     if not dag_id or not execution_id:
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
-    dag_root_folder_path = f"{dag_id}_{execution_id}"
     # 獲取 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
     if logger:
@@ -252,7 +265,10 @@ async def download_dataset(request:DagRequest):
 
         # 2. git clone {dvc file url} based on dag_root_folder_path
         # 確認桌面是否有創建 "dag_root_folder"
-        dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
+        
+        dag_root_folder =Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
+        # 組合路徑：/mnt/storage/{dag_id}_{execution_id}
+    
         if not dag_root_folder.exists():
             raise HTTPException(status_code=404, detail="dag_root_folder was not created")
         logger.info(f"Confirmed existence of {dag_root_folder}")
@@ -296,7 +312,6 @@ async def setup_folders_for_preprocessing(request: DagRequest):
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
     task_stage_type = request.TASK_STAGE_TYPE
-    dag_root_folder_path = f"{dag_id}_{execution_id}"
 
     # 獲取 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
@@ -311,7 +326,7 @@ async def setup_folders_for_preprocessing(request: DagRequest):
         logger.info(f"Received request with {dag_id}")
 
         # 1. 確認桌面是否創建 "dag_root_folder"
-        dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
+        dag_root_folder =Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
         if not dag_root_folder.exists():
             raise HTTPException(status_code=404, detail="dag_root_folder was not created")
         logger.info(f"Confirmed existence of {dag_root_folder}")
@@ -344,7 +359,6 @@ async def modify_preprocessing_config(request: DagRequest):
     if not dag_id or not execution_id:
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
-    dag_root_folder_path = f"{dag_id}_{execution_id}"
     dataset_name = request.DATASET_NAME
     dataset_version = request. DATASET_VERSION
     
@@ -354,7 +368,7 @@ async def modify_preprocessing_config(request: DagRequest):
         logger_manager.log_section_header(logger, "Preprocessing/ModifyPreprocessingConfig")
 
     try:
-        dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
+        dag_root_folder =Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
         dag_root_folder_path = Path(dag_root_folder)
         repo_preprocessing_path = Path(dag_root_folder_path / "NCU-RSS-1.5-Preprocessing")
         config_path = repo_preprocessing_path / "config.py"
@@ -419,14 +433,13 @@ async def execute_generate_parcel_unique_id(request: DagRequest):
     if not dag_id or not execution_id:
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
-    dag_root_folder_path = f"{dag_id}_{execution_id}"
 
     # 獲取對應logger 
     logger = logger_manager.get_logger(dag_id, execution_id)
     if logger:
         logger_manager.log_section_header(logger, "Preprocessing/GenerateParcelUniqueId")
 
-    dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
+    dag_root_folder =Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
     root_folder_path = Path(dag_root_folder)
     repo_preprocessing_path = Path(root_folder_path / "NCU-RSS-1.5-Preprocessing")
     generate_parcel_unique_id_script_path = Path(repo_preprocessing_path / "generate_parcel_unique_id.py")
@@ -466,14 +479,13 @@ async def execute_generate_png(request: DagRequest):
     if not dag_id or not execution_id:
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
-    dag_root_folder_path = f"{dag_id}_{execution_id}"
 
     # 獲取對應的 Logger 
     logger = logger_manager.get_logger(dag_id, execution_id)
     if logger:
         logger_manager.log_section_header(logger, "Preprocessing/GeneratePng")
 
-    dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
+    dag_root_folder =Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
     root_folder_path = Path(dag_root_folder)
     repo_preprocessing_path = Path(root_folder_path / "NCU-RSS-1.5-Preprocessing")
     generate_png_script_path = Path(repo_preprocessing_path / "generate_png.py")
@@ -513,14 +525,13 @@ async def execute_write_gt_file(request: DagRequest):
     if not dag_id or not execution_id:
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
-    dag_root_folder_path = f"{dag_id}_{execution_id}"
 
     # 獲取對應logger 
     logger = logger_manager.get_logger(dag_id, execution_id)
     if logger:
         logger_manager.log_section_header(logger, "Preprocessing/WriteGtFile")
 
-    dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
+    dag_root_folder =Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
     root_folder_path = Path(dag_root_folder)
     repo_preprocessing_path = Path(root_folder_path / "NCU-RSS-1.5-Preprocessing")
     write_gt_file_script_path = Path(repo_preprocessing_path / "write_gt_file.py")
@@ -561,7 +572,6 @@ async def upload_preprocessing_result(request: DagRequest):
     if not dag_id or not execution_id:
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
-    dag_root_folder_path = f"{dag_id}_{execution_id}"
 
     # 獲取對應的 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
@@ -572,7 +582,7 @@ async def upload_preprocessing_result(request: DagRequest):
 
     try:
         
-        dag_root_folder = Path.home() / "Desktop" / dag_root_folder_path
+        dag_root_folder =Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
         root_folder_path = Path(dag_root_folder)
         repo_preprocessing_path = root_folder_path / "NCU-RSS-1.5-Preprocessing"
         ######################
@@ -623,6 +633,7 @@ async def upload_preprocessing_result(request: DagRequest):
         logger.error(f"Unexpected error occurred: {str(e)}")
         return {"status": "error", "message": str(e)}, 500
 
+# [Preprocessing/UploadLogToS3]
 @app.post("/Preprocessing/UploadLogToS3")
 async def upload_log_to_s3(request: DagRequest):
     
@@ -633,18 +644,17 @@ async def upload_log_to_s3(request: DagRequest):
     if not dag_id or not execution_id:
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
-    dag_root_folder_path = f"{dag_id}_{execution_id}"
-    
     # 獲取 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
     if logger:
         logger_manager.log_section_header(logger, "Preprocessing/UploadLogToS3")
     dvc_worker = dvc_manager.get_worker(dag_id, execution_id)
 
-    try:
-        
+    try:       
         # Log 檔案路徑
-        log_file_path = Path.home() / "Desktop" / dag_root_folder_path / "LOGS" / f"{dag_id}_{execution_id}.txt"
+        dag_root_folder =Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
+
+        log_file_path = Path(dag_root_folder) / "LOGS" / f"{dag_id}_{execution_id}.txt"
         if not log_file_path.exists():
             raise HTTPException(status_code=404, detail=f"Log file {log_file_path} not found.")
 
