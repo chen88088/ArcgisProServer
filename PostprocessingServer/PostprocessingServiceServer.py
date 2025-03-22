@@ -62,6 +62,7 @@ class DagRequest(BaseModel):
     MODEL_VERSION: str
     DEPLOYER_NAME: str
     DEPLOYER_EMAIL: str
+    PIPELINE_CONFIG: Dict[str, str]
 
 def register_machine():
     """
@@ -182,7 +183,7 @@ async def register_dag_and_logger_and_dvc_worker(request: DagRequest):
     if dag_manager.is_registered(dag_id, execution_id):
         return {"status": "success", "message": "DAG is already registered."}
     
-    dag_root_folder_path = Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
+    dag_root_folder_path = os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")
 
     # 登記 DAG 到 dag_manager
     dag_manager.register_dag(dag_id, execution_id , dag_root_folder_path)
@@ -468,7 +469,7 @@ async def upload_log_to_s3(request: DagRequest):
     # 獲取或初始化 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
     if logger:
-        logger_manager.log_section_header(logger, "Postprocessing/ModifyPostprocessingConfig")
+        logger_manager.log_section_header(logger, "Postprocessing/UploadLogToS3")
     dvc_worker = dvc_manager.get_worker(dag_id, execution_id)
 
     try:
