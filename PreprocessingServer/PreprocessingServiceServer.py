@@ -64,6 +64,7 @@ class DagRequest(BaseModel):
     MODEL_VERSION: str
     DEPLOYER_NAME: str
     DEPLOYER_EMAIL: str
+    PIPELINE_CONFIG: Dict[str, str]
 
 
 def register_machine():
@@ -196,7 +197,7 @@ async def register_dag_and_logger_and_dvc_worker(request: DagRequest):
         return {"status": "success", "message": "DAG is already registered."}
 
     
-    dag_root_folder_path = Path(os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")) 
+    dag_root_folder_path = os.path.join(STORAGE_PATH, f"{dag_id}_{execution_id}")
 
 
     # 登記 DAG 到 dag_manager
@@ -572,7 +573,9 @@ async def upload_preprocessing_result(request: DagRequest):
     if not dag_id or not execution_id:
         raise HTTPException(status_code=400, detail="DAG_ID and EXECUTION_ID are required.")
     
-
+    deployer_name = request.DEPLOYER_NAME
+    deployer_email = request.DEPLOYER_EMAIL
+    
     # 獲取對應的 Logger 和 DVCWorker
     logger = logger_manager.get_logger(dag_id, execution_id)
     if logger:
@@ -611,6 +614,9 @@ async def upload_preprocessing_result(request: DagRequest):
 
 
         # 提交所有更改並推送到 Git
+
+        subprocess.run(["git", "config", "--global", "user.name", f"{deployer_name}"], check=True)
+        subprocess.run(["git", "config", "--global", "user.email", f"{deployer_email}"], check=True)       
         logger.info(f"Committing and pushing DVC changes for {result_folder} and {result_folder} to Git")
         git_commit_result = dvc_worker.git_add_commit_and_push(
             project_path=root_folder_path,
