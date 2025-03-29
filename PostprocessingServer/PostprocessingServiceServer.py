@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.DEBUG)
 # SERVICE_PORT = 8085
 # SERVICE_RESOURCE_TYPE = "ARCGIS"
 
-CONSUL_HOST = "http://10.52.52.138:8500"
+CONSUL_HOST = "http://10.52.52.142:30850"
 
 SERVICE_NAME = "Postprocessing"
 NODE_ID = socket.gethostname()
