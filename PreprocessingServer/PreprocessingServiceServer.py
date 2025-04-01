@@ -5,7 +5,7 @@ import logging
 import requests
 import subprocess
 from pydantic import BaseModel
-from typing import List
+from typing import List, Any, Dict
 from pathlib import Path
 import os
 import shutil
@@ -21,7 +21,6 @@ import socket
 import json
 
 
-# 設置基本的日誌設定
 logging.basicConfig(level=logging.DEBUG)
 
 # NODE_AGENT_URL = "http://10.52.52.137:8080"
@@ -64,7 +63,7 @@ class DagRequest(BaseModel):
     MODEL_VERSION: str
     DEPLOYER_NAME: str
     DEPLOYER_EMAIL: str
-    PIPELINE_CONFIG: Dict[str, str]
+    PIPELINE_CONFIG: Dict[str, Any]
 
 
 def register_machine():
